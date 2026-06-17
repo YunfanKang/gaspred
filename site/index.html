@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>gaspred — gas price forecast</title>
+<style>
+  :root {
+    --bg: #faf9f7; --card: #fff; --ink: #1c1c1a; --muted: #6b6a64; --line: #e7e5df;
+    --oil: #BA7517; --actual: #185FA5; --ridge: #D85A30; --gbm: #7F77DD;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  h2 { font-size: 16px; font-weight: 600; margin: 0 0 12px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 20px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 18px; }
+  label { font-size: 13px; color: var(--muted); margin-right: 6px; }
+  select { font-size: 15px; padding: 8px 12px; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--card); color: var(--ink); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; margin-bottom: 18px; }
+  .chart-box { position: relative; height: 400px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 14px; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 22px; height: 0; border-top-width: 3px; border-top-style: solid; display: inline-block; }
+  .slider-row { display: flex; align-items: center; gap: 12px; margin-top: 16px;
+    padding-top: 14px; border-top: 1px solid var(--line); }
+  .slider-row input[type=range] { flex: 1; max-width: 420px; }
+  .slider-row .val { font-size: 14px; font-weight: 600; min-width: 84px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: right; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr.best td { background: #f1f5fb; font-weight: 600; }
+  td .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+  .err { color: #a32d2d; }
+  a { color: var(--actual); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>U.S. gasoline price forecast</h1>
+  <p class="sub" id="subtitle">Loading…</p>
+
+  <div class="controls">
+    <div><label for="region">Granularity / region</label><select id="region"></select></div>
+  </div>
+
+  <div class="card" id="recCard"></div>
+
+  <div class="card">
+    <div class="legend" id="legend"></div>
+    <div class="chart-box"><canvas id="chart"></canvas></div>
+    <div class="slider-row">
+      <label for="range">Time range</label>
+      <input type="range" id="range" min="0" max="5" step="1" value="1" />
+      <span class="val" id="rangeLabel">3 months</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Model comparison <span style="font-weight:400;color:var(--muted);font-size:13px">(out-of-sample backtest)</span></h2>
+    <table id="cmpTable"></table>
+    <p class="foot" id="foot"></p>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const COLORS = { oil: '#BA7517', actual: '#185FA5', ridge: '#D85A30', gbm: '#7F77DD' };
+const STYLE  = { ridge: [6, 4], gbm: [2, 3] };   // line dash per model
+const WINDOWS = [
+  { label: '1 month',  days: 30 },
+  { label: '3 months', days: 91 },
+  { label: '6 months', days: 182 },
+  { label: '1 year',   days: 365 },
+  { label: '2 years',  days: 730 },
+  { label: 'All',      days: Infinity },
+];
+let DATA = null, chart = null, recWin = 2;
+
+// Vertical "now" line at the last actual observation (forecast begins to its right).
+const nowLine = {
+  id: 'nowLine',
+  afterDraw(c) {
+    const idx = c.$nowIndex;
+    if (idx == null || idx < 0) return;
+    const x = c.scales.x.getPixelForValue(c.data.labels[idx]);
+    const { top, bottom } = c.chartArea, ctx = c.ctx;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(28,28,26,0.35)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle = 'rgba(28,28,26,0.6)'; ctx.font = '11px sans-serif';
+    ctx.fillText('now', x + 4, top + 12);
+    ctx.restore();
+  }
+};
+Chart.register(nowLine);
+
+function fmt(x, d) { return x == null ? '—' : Number(x).toFixed(d); }
+
+function render(region, winIdx) {
+  const r = DATA.regions[region];
+  const all = r.series;
+  const maxDate = new Date(all[all.length - 1].date);
+  const days = WINDOWS[winIdx].days;
+  let s = all;
+  if (isFinite(days)) {
+    const cut = new Date(maxDate); cut.setDate(cut.getDate() - days);
+    s = all.filter(p => new Date(p.date) >= cut);
+  }
+  const labels = s.map(p => p.date);
+
+  let nowIndex = -1;
+  for (let i = 0; i < s.length; i++) if (s[i].actual != null) nowIndex = i;
+
+  const line = (key, color, opts) => Object.assign({
+    label: key, data: s.map(p => p[key]), borderColor: color, backgroundColor: color,
+    borderWidth: 2, pointRadius: 0, spanGaps: true, tension: 0.2
+  }, opts || {});
+
+  const datasets = [line('actual', COLORS.actual, { yAxisID: 'yGas' })];
+  for (const k of r.models)
+    datasets.push(line(k, COLORS[k] || '#888', { yAxisID: 'yGas', borderDash: STYLE[k] || [] }));
+  datasets.push(line('oil', COLORS.oil, { yAxisID: 'yOil', borderWidth: 1.5 }));
+
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: c => {
+          const oil = c.dataset.yAxisID === 'yOil';
+          const name = c.dataset.label === 'oil' ? 'WTI oil'
+            : c.dataset.label === 'actual' ? 'Actual'
+            : (r.model_labels[c.dataset.label] || c.dataset.label);
+          return `${name}: ${c.parsed.y == null ? '—' : c.parsed.y.toFixed(oil ? 1 : 3)}${oil ? ' $/bbl' : ' $/gal'}`;
+        }}}},
+      scales: {
+        x: { ticks: { maxTicksLimit: 10, autoSkip: true }, grid: { display: false } },
+        yGas: { position: 'left', title: { display: true, text: 'Gas $/gal' } },
+        yOil: { position: 'right', title: { display: true, text: 'Oil $/bbl' }, grid: { drawOnChartArea: false } },
+      }
+    }
+  });
+  chart.$nowIndex = nowIndex;
+  chart.update();
+
+  renderLegend(r);
+  renderCompare(r);
+  renderDecision(r);
+}
+
+function renderDecision(r) {
+  const el = document.getElementById('recCard'), dn = r.decision;
+  if (!dn || !dn.windows) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  recWin = Math.min(recWin, dn.max_wait);
+  el.innerHTML =
+    `<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">` +
+      `<label style="font-size:13px;color:var(--muted)">Willing to wait up to</label>` +
+      `<input type="range" id="recwin" min="1" max="${dn.max_wait}" step="1" value="${recWin}" style="max-width:200px">` +
+      `<span class="val" id="recwinlbl" style="font-weight:600;min-width:64px">${recWin} week${recWin > 1 ? 's' : ''}</span>` +
+    `</div><div id="recBody"></div>`;
+  const slider = document.getElementById('recwin');
+  slider.oninput = () => {
+    recWin = +slider.value;
+    document.getElementById('recwinlbl').textContent = `${recWin} week${recWin > 1 ? 's' : ''}`;
+    renderRecBody(dn);
+  };
+  renderRecBody(dn);
+}
+
+function renderRecBody(dn) {
+  const w = dn.windows[String(recWin)] || {};
+  const cfg = ({
+    fill_now: { label: 'Fill up now', color: '#854F0B', bg: '#FAEEDA' },
+    wait:     { label: 'OK to wait',  color: '#0F6E56', bg: '#E1F5EE' },
+    flat:     { label: 'No clear edge', color: '#444441', bg: '#F1EFE8' },
+  })[w.action] || { label: '—', color: '#444441', bg: '#F1EFE8' };
+  const c = Math.abs(w.expected_change_cents || 0).toFixed(1);
+  const wk = recWin > 1 ? 'weeks' : 'week';
+  let msg;
+  if (w.action === 'wait') msg = `Likely about <b>${c}¢/gal cheaper</b> within ~${w.best_week} week${w.best_week > 1 ? 's' : ''}. Consider holding off.`;
+  else if (w.action === 'fill_now') msg = `Likely about <b>${c}¢/gal higher</b> over the next ${recWin} ${wk}. Fill up now.`;
+  else msg = `Roughly <b>flat</b> over the next ${recWin} ${wk} — little advantage either way.`;
+  const tr = w.track_record || {};
+  const trTxt = (tr.save_cents_per_gal != null)
+    ? `Backtest (wait up to ${recWin} ${wk}): saved ~${tr.save_cents_per_gal}¢/gal on average · captured ${tr.capture_pct}% of the best achievable · when it said “wait,” prices fell ${tr.wait_win_rate_pct}% of the time.`
+    : '';
+  document.getElementById('recBody').innerHTML =
+    `<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">` +
+      `<div style="font-size:16px;font-weight:600;padding:10px 18px;border-radius:10px;background:${cfg.bg};color:${cfg.color};white-space:nowrap">${cfg.label}</div>` +
+      `<div style="font-size:15px;line-height:1.5">${msg} <span style="color:var(--muted)">Now $${dn.price_now}/gal, as of ${dn.as_of}.</span></div>` +
+    `</div>` +
+    (trTxt ? `<div style="font-size:12px;color:var(--muted);margin-top:12px">${trTxt}</div>` : '');
+}
+
+function renderLegend(r) {
+  const items = [['actual', 'Actual gas price', COLORS.actual, 'solid']];
+  for (const k of r.models) items.push([k, r.model_labels[k] || k, COLORS[k], 'dashed']);
+  items.push(['oil', 'WTI crude oil (right axis)', COLORS.oil, 'solid']);
+  document.getElementById('legend').innerHTML = items.map(([k, lbl, c, st]) =>
+    `<span><i class="swatch" style="border-top-color:${c};border-top-style:${st}"></i>${lbl}</span>`).join('');
+}
+
+function renderCompare(r) {
+  const rows = r.models.map(k => ({ key: k, label: r.model_labels[k] || k, m: r.metrics[k] || {} }));
+  rows.push({ key: 'naive', label: 'Naive (last price)', m: r.metrics.naive || {} });
+  let bestMae = Infinity, bestKey = null;
+  for (const row of rows) if (row.key !== 'naive' && row.m.mae != null && row.m.mae < bestMae) { bestMae = row.m.mae; bestKey = row.key; }
+
+  const head = '<thead><tr><th>Model</th><th>MAE ($/gal)</th><th>RMSE</th><th>MAPE</th><th>Skill vs. naive</th></tr></thead>';
+  const body = rows.map(row => {
+    const m = row.m, dot = COLORS[row.key] ? `<span class="dot" style="background:${COLORS[row.key]}"></span>` : '';
+    const skill = row.key === 'naive' ? '—' : (m.skill_vs_naive_pct != null ? fmt(m.skill_vs_naive_pct, 0) + '%' : '—');
+    return `<tr class="${row.key === bestKey ? 'best' : ''}"><td>${dot}${row.label}</td>` +
+      `<td>${m.mae != null ? '$' + fmt(m.mae, 3) : '—'}</td><td>${m.rmse != null ? '$' + fmt(m.rmse, 3) : '—'}</td>` +
+      `<td>${m.mape_pct != null ? fmt(m.mape_pct, 1) + '%' : '—'}</td><td>${skill}</td></tr>`;
+  }).join('');
+  document.getElementById('cmpTable').innerHTML = head + '<tbody>' + body + '</tbody>';
+}
+
+function init() {
+  const sel = document.getElementById('region');
+  sel.innerHTML = DATA.region_order.map(r => `<option value="${r}">${DATA.regions[r].name}</option>`).join('');
+  const range = document.getElementById('range'), rangeLabel = document.getElementById('rangeLabel');
+  const draw = () => { rangeLabel.textContent = WINDOWS[+range.value].label; render(sel.value, +range.value); };
+  sel.onchange = draw;
+  range.oninput = draw;
+
+  const banner = DATA.synthetic
+    ? '<span class="err">⚠ synthetic placeholder data — run <code>python update.py</code> for real data.</span> · ' : '';
+  document.getElementById('subtitle').innerHTML =
+    `${banner}${DATA.horizon_weeks}-week-ahead forecast · updated ${DATA.generated_utc} · data: EIA + FRED`;
+  document.getElementById('foot').innerHTML =
+    `Predicted lines are strictly out-of-sample (expanding-window backtest) and extend ${DATA.horizon_weeks} weeks ` +
+    'past "now". MAE/RMSE in $/gal; "skill vs. naive" = error reduction vs. a random-walk (last-price) forecast — ' +
+    'higher is better; the best model is highlighted. Sources: ' +
+    '<a href="https://www.eia.gov/petroleum/gasdiesel/">EIA</a>, <a href="https://fred.stlouisfed.org/">FRED</a>.';
+  draw();
+}
+
+fetch('data/predictions.json', { cache: 'no-store' })
+  .then(r => { if (!r.ok) throw new Error('predictions.json not found'); return r.json(); })
+  .then(d => { DATA = d; init(); })
+  .catch(e => {
+    document.getElementById('subtitle').innerHTML =
+      `<span class="err">No data yet (${e.message}). Run <code>python update.py</code> or the update workflow.</span>`;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+.env
+# local panel cache (root only) — keep site/data/ tracked so Pages can serve predictions.json
+/data/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
