@@ -1,7 +1,7 @@
 name: Update predictions
 
-# Refreshes site/data/predictions.json and commits it. With GitHub Pages set to
-# "Deploy from a branch" (main, /site), the commit republishes the site automatically.
+# Refreshes site/data/predictions.json and publishes site/ to GitHub Pages via Actions.
+# (Branch-folder Pages only allows / or /docs, so we deploy the site/ folder as an artifact.)
 
 on:
   schedule:
@@ -9,15 +9,20 @@ on:
   workflow_dispatch: {}      # allow manual runs from the Actions tab
 
 permissions:
-  contents: write            # lets the job commit the refreshed data back
+  contents: write            # commit the refreshed data back
+  pages: write               # deploy to Pages
+  id-token: write            # required by actions/deploy-pages
 
 concurrency:
-  group: update-predictions
+  group: pages
   cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,8 +45,15 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add site/data/predictions.json
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No data change."
           else
             git commit -m "data: refresh predictions [skip ci]"
             git push
           fi
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

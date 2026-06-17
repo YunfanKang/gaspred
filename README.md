@@ -34,9 +34,8 @@ Everything below is free. Two API keys, and (for deployment) a few GitHub settin
 **3. To deploy (GitHub Actions + Pages):**
 - Push this folder to a GitHub repo.
 - Add both keys as **repository secrets**: repo *Settings → Secrets and variables → Actions → New repository secret*, named exactly `EIA_API_KEY` and `FRED_API_KEY`.
-- Enable Pages: *Settings → Pages → Source: “Deploy from a branch” → branch `main`, folder `/site`*.
-- Ensure Actions can push commits: *Settings → Actions → General → Workflow permissions → “Read and write permissions”* (the workflow also requests this itself).
-- Run it once: *Actions → “Update predictions” → Run workflow* (or wait for the daily cron).
+- Set **Pages source to “GitHub Actions”**: *Settings → Pages → Build and deployment → Source → GitHub Actions*. (The workflow deploys the `site/` folder as a Pages artifact — branch-folder Pages can only target `/` or `/docs`, not `/site`.)
+- Run it once: *Actions → “Update predictions” → Run workflow* (or wait for the daily cron). The run refreshes the data **and** publishes the site.
 
 That's it — nothing else is required from your side. Optional tweaks: the cron schedule in
 `.github/workflows/update.yml` and the forecast horizon (`--horizon`, default 4 weeks).
