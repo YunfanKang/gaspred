@@ -38,6 +38,14 @@
   td .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
   .foot { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.6; }
   .err { color: #a32d2d; }
+  details.method > summary { cursor: pointer; font-size: 16px; font-weight: 500; color: var(--ink); list-style: none; display: flex; align-items: center; gap: 8px; }
+  details.method > summary::-webkit-details-marker { display: none; }
+  details.method > summary::before { content: '▸'; color: var(--muted); font-size: 13px; }
+  details.method[open] > summary::before { content: '▾'; }
+  details.method .body { margin-top: 14px; font-size: 14px; line-height: 1.7; }
+  details.method .body h4 { font-size: 13px; font-weight: 600; margin: 18px 0 4px; color: var(--ink); }
+  details.method .body p { margin: 0 0 10px; color: var(--ink); }
+  details.method .body code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
   a { color: var(--actual); }
 </style>
 </head>
@@ -66,6 +74,39 @@
     <h2>Model comparison <span style="font-weight:400;color:var(--muted);font-size:13px">(out-of-sample backtest)</span></h2>
     <table id="cmpTable"></table>
     <p class="foot" id="foot"></p>
+  </div>
+
+  <div class="card">
+    <details class="method">
+      <summary>How the prediction is calculated</summary>
+      <div class="body">
+        <p>Each weekly forecast uses only information that was public at the time — no peeking ahead — and is validated on a strict out-of-sample backtest. The steps:</p>
+
+        <h4>1 · Data</h4>
+        <p>Weekly series from <b>EIA</b> (retail price, gasoline stocks, refinery utilization, product supplied) and <b>FRED</b> (WTI, Brent, broad USD index), plus WTI / Brent / RBOB futures. Built for the national average and each of the 5 PADD regions.</p>
+
+        <h4>2 · Look-ahead safety</h4>
+        <p>Everything is aligned to a weekly grid by <i>publication time</i>: a value enters the model only once it would actually have been released (retail price +1 day, EIA weekly reports +5 days, daily market data +1 day). A row dated week <i>t</i> uses only what was knowable by then — so the backtest can't cheat.</p>
+
+        <h4>3 · Factors (features)</h4>
+        <p>Per region: crude levels &amp; lags (WTI / Brent / RBOB); <b>asymmetric</b> 4-week crude moves — rises and falls counted separately, for the “rockets &amp; feathers” effect (pump prices rise fast, fall slow); crack spread (<code>RBOB×42 − WTI</code>); gasoline stocks; refinery utilization; demand (product supplied); USD index; the price's own 1–4-week lags; and seasonality (cyclical week-of-year + summer-blend flag).</p>
+
+        <h4>4 · Model</h4>
+        <p>A standardized <b>RidgeCV</b> (linear regression with cross-validated regularization) predicts the price <i>h</i> weeks ahead. A <b>gradient-boosting</b> model and a <b>naive</b> “last-price” baseline are run identically for the comparison table above. Ridge wins on real data; gradient boosting tends to overfit because the weekly gas–crude relationship is close to linear.</p>
+
+        <h4>5 · Backtest — the lines on the chart</h4>
+        <p>Expanding-window walk-forward: at each week the model trains only on rows whose outcome was already observable (an <i>embargo</i> of <i>h</i> weeks blocks leakage), then predicts forward. The historical predicted line is therefore strictly out-of-sample; its final <i>h</i> weeks extend past the “now” marker as the live forecast.</p>
+
+        <h4>6 · Accuracy metrics</h4>
+        <p><b>MAE / RMSE</b> — average error in $/gal. <b>MAPE</b> — average percentage error. <b>Skill vs. naive</b> — how much lower the error is than simply assuming “next period ≈ today”; positive means the model beats that naive guess.</p>
+
+        <h4>7 · “Fill up now vs. wait”</h4>
+        <p>For the chosen wait window (1–4 weeks) the model forecasts the path ahead. If the cheapest predicted week is more than ~2¢/gal below today's price, it says <b>wait</b> (and roughly when); otherwise <b>fill now</b>. Its line reports, for that window: average ¢/gal saved versus always filling today, the share of the best-achievable savings captured, and how often a “wait” call was right.</p>
+
+        <h4>8 · Caveats</h4>
+        <p>Short-term gasoline prices are close to a random walk, so level forecasts only modestly beat naive — the buy/wait direction is the more useful output. WTI's most recent week is backfilled from futures (FRED spot publishes ~a week late). Taxes, station-level prices, and one-off events (hurricanes, pipeline outages) are not modeled.</p>
+      </div>
+    </details>
   </div>
 </div>
 
